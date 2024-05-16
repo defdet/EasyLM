@@ -23,7 +23,7 @@ from EasyLM.jax_utils import (
 from EasyLM.models.llama.llama_model import (
     LLaMAConfig, FlaxLLaMAForCausalLMModule
 )
-
+from transformers import AutoTokenizer
 
 FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     seed=42,
@@ -61,7 +61,7 @@ def main(argv):
     )
     set_random_seed(FLAGS.seed)
 
-    tokenizer = LLaMAConfig.get_tokenizer(FLAGS.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained("Undi95/Meta-Llama-3-8B-hf")
     dataset = DatasetFactory.load_dataset(FLAGS.train_dataset, tokenizer)
     if FLAGS.load_dataset_state != '':
         dataset.load_state_dict(mlxu.load_pickle(FLAGS.load_dataset_state))
