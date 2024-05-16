@@ -3,7 +3,6 @@ from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import tempfile
-from functools import partial
 
 import numpy as np
 import jax
@@ -16,18 +15,16 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from flax.linen import partitioning as nn_partitioning
-import einops
 
 import sentencepiece as spm
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
-from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
+from transformers.modeling_flax_utils import FlaxPreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 
 from ml_collections import ConfigDict
-from ml_collections.config_dict import config_dict
 from mlxu import function_args_to_config, load_pickle, open_file
 
 from EasyLM.bpt import blockwise_ffn, blockwise_attn
@@ -43,7 +40,7 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 5504,
         'num_hidden_layers': 22,
         'num_attention_heads': 16,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
         'use_cache': True,
@@ -55,7 +52,7 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 8640,
         'num_hidden_layers': 26,
         'num_attention_heads': 32,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
         'use_cache': True,
@@ -67,7 +64,19 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 11008,
         'num_hidden_layers': 32,
         'num_attention_heads': 32,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-6,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '7bcode': {
+        'vocab_size': 32016,
+        'hidden_size': 4096,
+        'intermediate_size': 11008,
+        'num_hidden_layers': 32,
+        'num_attention_heads': 32,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
         'use_cache': True,
@@ -79,7 +88,19 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 13824,
         'num_hidden_layers': 40,
         'num_attention_heads': 40,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-6,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '13bcode': {
+        'vocab_size': 32016,
+        'hidden_size': 5120,
+        'intermediate_size': 13824,
+        'num_hidden_layers': 40,
+        'num_attention_heads': 40,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
         'use_cache': True,
@@ -91,11 +112,53 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 17920,
         'num_hidden_layers': 60,
         'num_attention_heads': 52,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
         'use_cache': True,
         'tie_word_embeddings': False,
+    },
+    "30b2": {
+        'vocab_size': 32000,
+        'hidden_size': 8192,
+        'intermediate_size': 22016,
+        'num_hidden_layers': 48,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 16384,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-6,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    "30bcode": {
+        'vocab_size': 32000,  # weirdly, only the 30b codellama has 32000 tokens
+        'hidden_size': 8192,
+        'intermediate_size': 22016,
+        'num_hidden_layers': 48,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 16384,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-6,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '34byi': {
+        'vocab_size': 64000,
+        'hidden_size': 7168,
+        'intermediate_size': 20480,
+        'num_hidden_layers': 60,
+        'num_attention_heads': 56,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        'rope_theta': 5000000,
+        'max_sequence_length': 4096,
+        'use_hf_rotary_emb': True
     },
     '65b': {
         'vocab_size': 32000,
@@ -103,11 +166,65 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 22016,
         'num_hidden_layers': 80,
         'num_attention_heads': 64,
-        'max_sequence_length': 2048,
+        'max_sequence_length': 8192,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-5,
         'use_cache': True,
         'tie_word_embeddings': False,
+    },
+    '70b': {
+        'vocab_size': 32000,
+        'hidden_size': 8192,
+        'intermediate_size': 28672,
+        'num_hidden_layers': 80,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '8b': {
+        'vocab_size': 128256,
+        'hidden_size': 4096,
+        'intermediate_size': 14336,
+        'num_hidden_layers': 32,
+        'num_attention_heads': 32,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '70bcode': {
+        'vocab_size': 32016,
+        'hidden_size': 8192,
+        'intermediate_size': 28672,
+        'num_hidden_layers': 80,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 16384,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+    },
+    '70bflash': {
+        'vocab_size': 32000,
+        'hidden_size': 8192,
+        'intermediate_size': 28672,
+        'num_hidden_layers': 80,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        'scan_attention': True,
+        'scan_mlp': True,
     },
     'debug': { # A small model for debugging
         'vocab_size': 32000,
@@ -115,6 +232,7 @@ LLAMA_STANDARD_CONFIGS = {
         'intermediate_size': 256,
         'num_hidden_layers': 2,
         'num_attention_heads': 4,
+        'num_key_value_heads': 2,
         'max_sequence_length': 2048,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-6,
@@ -175,6 +293,7 @@ class LLaMAConfig(PretrainedConfig):
         intermediate_size=11008,
         num_hidden_layers=32,
         num_attention_heads=32,
+        num_key_value_heads=None,
         max_sequence_length=2048,
         rms_norm_eps=1e-6,
         initializer_range=0.02,
@@ -196,6 +315,8 @@ class LLaMAConfig(PretrainedConfig):
         scan_mlp_chunk_size=1024,
         fcm_min_ratio=0.0,
         fcm_max_ratio=0.0,
+        rope_theta=10000,
+        use_hf_rotary_emb=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -204,6 +325,8 @@ class LLaMAConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.n_rep = num_attention_heads // num_key_value_heads if num_key_value_heads is not None else 1
         self.max_sequence_length = max_sequence_length
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
@@ -220,6 +343,8 @@ class LLaMAConfig(PretrainedConfig):
         self.scan_mlp_chunk_size = scan_mlp_chunk_size
         self.fcm_min_ratio = fcm_min_ratio
         self.fcm_max_ratio = fcm_max_ratio
+        self.rope_theta = rope_theta
+        self.use_hf_rotary_emb = use_hf_rotary_emb
         super().__init__(
             # pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -350,6 +475,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float=10000.0, dtype: jnp.dt
     freqs_cis = np.complex64(cos + 1j * sin)
     return jnp.asarray(freqs_cis)
 
+def precompute_hf_freqs_cis(dim: int, end: int, theta: float=10000.0, dtype: jnp.dtype=jnp.float32) -> jnp.ndarray:
+    inv_freq = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)].astype(dtype) / dim))
+    return inv_freq
+
 def apply_rotary_emb(
     xq: jnp.ndarray,
     xk: jnp.ndarray,
@@ -374,6 +503,19 @@ def apply_rotary_emb(
 
     return xq_out.astype(dtype), xk_out.astype(dtype)
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return jnp.concatenate((-x2, x1), axis=-1)
+
+def apply_hf_style_rotary_emb(q, k, cos, sin, position_ids=None):
+    cos = cos[:, None]
+    sin = sin[:, None]
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
 
 class FlaxLLaMAAttention(nn.Module):
     config: LLaMAConfig
@@ -384,11 +526,15 @@ class FlaxLLaMAAttention(nn.Module):
     def setup(self):
         config = self.config
         self.embed_dim = config.hidden_size
+        # llama 2 change
+        self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
+        self.num_heads = config.num_attention_heads
+        self.num_repetitions = config.n_rep
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
 
         self.wq = nn.Dense(
-            config.num_attention_heads*self.head_dim,
+            self.num_heads*self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
@@ -396,7 +542,7 @@ class FlaxLLaMAAttention(nn.Module):
             precision=self.precision,
         )
         self.wk = nn.Dense(
-            config.num_attention_heads*self.head_dim,
+            self.num_key_value_heads*self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
@@ -404,7 +550,7 @@ class FlaxLLaMAAttention(nn.Module):
             precision=self.precision,
         )
         self.wv = nn.Dense(
-            config.num_attention_heads*self.head_dim,
+            self.num_key_value_heads*self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
@@ -427,11 +573,12 @@ class FlaxLLaMAAttention(nn.Module):
         self.freqs_cis = precompute_freqs_cis(
             self.head_dim,
             config.max_sequence_length * 2,
+            theta=self.config.rope_theta,
             dtype=self.dtype,
         )
 
-    def _split_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
+    def _split_heads(self, hidden_states, num_heads):
+        return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
 
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
@@ -468,6 +615,17 @@ class FlaxLLaMAAttention(nn.Module):
             attention_mask = combine_masks(pad_mask, attention_mask)
         return key, value, attention_mask
 
+    def repeat_kv(self, x, n_rep):
+        """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+        bs, slen, n_kv_heads, head_dim = x.shape
+        if n_rep == 1:
+            return x
+        return (
+            jnp.repeat(x[:, :, :, None, :], n_rep, axis=3)
+            .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+        )
+
+
     def __call__(
         self,
         hidden_states,
@@ -484,13 +642,31 @@ class FlaxLLaMAAttention(nn.Module):
         xk = with_sharding_constraint(xk, PS(("dp", "fsdp"), None, "mp"))
         xv = with_sharding_constraint(xv, PS(("dp", "fsdp"), None, "mp"))
 
-        xq = self._split_heads(xq)
-        xk = self._split_heads(xk)
-        xv = self._split_heads(xv)
+        xq = self._split_heads(xq, self.num_heads)
+        xk = self._split_heads(xk, self.num_key_value_heads)
+        xv = self._split_heads(xv, self.num_key_value_heads)
 
         freqs_cis = jnp.take(self.freqs_cis, position_ids, axis=0)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=self.dtype)
+        if self.config.use_hf_rotary_emb:
+            inv_freq = precompute_hf_freqs_cis(self.head_dim,
+                self.config.max_sequence_length * 2,
+                theta=self.config.rope_theta,
+                dtype=self.dtype,
+            )
+            inv_freq_expanded = inv_freq[None, :, None].astype(jnp.float32).repeat(position_ids.shape[0], axis=0)
+            position_ids_expanded = position_ids[:, None, :].astype(jnp.float32)
+            freqs = (inv_freq_expanded.astype(jnp.float32) @ position_ids_expanded.astype(jnp.float32)).transpose([0, 2, 1])
+            emb = jnp.concatenate((freqs, freqs), axis=-1)
+            cos = np.cos(emb)
+            sin = np.sin(emb)
+            xq = xq.transpose(0, 2, 1, 3)
+            xk = xk.transpose(0, 2, 1, 3)
+            xq, xk = apply_hf_style_rotary_emb(xq, xk, cos, sin)
+            xq = xq.transpose(0, 2, 1, 3)
+            xk = xk.transpose(0, 2, 1, 3)
+        else:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=self.dtype)
 
         dropout_rng = None
         if not deterministic and self.config.attn_pdrop > 0.0:
@@ -498,6 +674,9 @@ class FlaxLLaMAAttention(nn.Module):
 
         if self.config.scan_attention and not (self.has_variable("cache", "cached_key") or init_cache):
             # doesn't need blockwise attention if we are doing autoregressive decoding since no quadratic memory
+            # if we have GQA - repeat out. have to do here due to kv cache shenanigans.
+            xk = self.repeat_kv(xk, self.num_repetitions)
+            xv = self.repeat_kv(xv, self.num_repetitions)
 
             # attention mask without nxn materlization, blockwise_attn will handle the rest
             attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
@@ -548,6 +727,10 @@ class FlaxLLaMAAttention(nn.Module):
             # and cache the keys and values step by step.
             if self.has_variable("cache", "cached_key") or init_cache:
                 xk, xv, attention_mask = self._concatenate_to_cache(xk, xv, xq, attention_mask)
+
+            # grouped query attention: repeat if num_kv_heads < num_heads:
+            xk = self.repeat_kv(xk, self.num_repetitions)
+            xv = self.repeat_kv(xv, self.num_repetitions)
 
             # transform boolean mask into float mask
             attention_bias = lax.select(
@@ -804,14 +987,14 @@ class FlaxLLaMAPreTrainedModel(FlaxPreTrainedModel):
 
         batch_size, sequence_length = input_ids.shape
 
+        if attention_mask is None:
+            attention_mask = jnp.ones((batch_size, sequence_length))
+
         if position_ids is None:
             if past_key_values is not None:
                 raise ValueError("Make sure to provide `position_ids` when passing `past_key_values`.")
 
-            position_ids = jnp.broadcast_to(jnp.arange(sequence_length)[None, :], (batch_size, sequence_length))
-
-        if attention_mask is None:
-            attention_mask = jnp.ones((batch_size, sequence_length))
+            position_ids = jnp.broadcast_to(jnp.clip(jnp.cumsum(attention_mask, axis=-1) - 1, a_min=0), (batch_size, sequence_length))
 
         # Handle any PRNG if needed
         rngs = {}
@@ -1098,6 +1281,132 @@ class FlaxLLaMAForCausalLM(FlaxLLaMAPreTrainedModel):
         model_kwargs["position_ids"] = model_kwargs["position_ids"][:, -1:] + 1
         return model_kwargs
 
+
+class FlaxLLaMAForSequenceClassificationModule(nn.Module):
+    config: LLaMAConfig
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
+
+    def setup(self):
+        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
+        self.score = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            use_bias=False,
+            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            precision=self.precision,
+        )
+
+    def __call__(
+        self,
+        input_ids,
+        attention_mask=None,
+        position_ids=None,
+        deterministic: bool = True,
+        init_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+    ):
+        batch_size, seq_length = input_ids.shape
+        if attention_mask is None:
+            attention_mask = jnp.ones_like(input_ids)
+        if position_ids is None:
+            position_ids = jnp.broadcast_to(
+                jnp.clip(jnp.cumsum(attention_mask, axis=-1) - 1, a_min=0),
+                (batch_size, seq_length)
+            )
+        outputs = self.transformer(
+            input_ids,
+            attention_mask,
+            position_ids,
+            deterministic=deterministic,
+            init_cache=init_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        hidden_states = outputs[0]
+
+        logits = self.score(hidden_states).squeeze(-1)  # (B, L)
+        # get the score for the final token
+        last_token_index = jnp.argmax(position_ids, axis=1) # (B)
+        logits = jnp.take_along_axis(logits, last_token_index[:, None], axis=-1).squeeze(-1) # (B)
+        if not return_dict:
+            return (logits,) + outputs[1:]
+        # slight abuse of the causal lm output
+        return FlaxCausalLMOutput(logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+
+
+@add_start_docstrings("", "")
+class FlaxLLaMAForSequenceClassification(FlaxLLaMAPreTrainedModel):
+    module_class = FlaxLLaMAForSequenceClassificationModule
+
+
+class FlaxLLaMAForTokenRegressionModule(nn.Module):
+    config: LLaMAConfig
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
+
+    def setup(self):
+        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
+        self.score = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            use_bias=False,
+            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            precision=self.precision,
+        )
+
+    def __call__(
+        self,
+        input_ids,
+        attention_mask=None,
+        position_ids=None,
+        deterministic: bool = True,
+        init_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+    ):
+        batch_size, seq_length = input_ids.shape
+        if attention_mask is None:
+            attention_mask = jnp.ones_like(input_ids)
+        if position_ids is None:
+            position_ids = jnp.broadcast_to(
+                jnp.clip(jnp.cumsum(attention_mask, axis=-1) - 1, a_min=0),
+                (batch_size, seq_length)
+            )
+        outputs = self.transformer(
+            input_ids,
+            attention_mask,
+            position_ids,
+            deterministic=deterministic,
+            init_cache=init_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        hidden_states = outputs[0]
+
+        logits = self.score(hidden_states).squeeze(-1)  # (B, L)
+        if not return_dict:
+            return (logits,) + outputs[1:]
+        # slight abuse of the causal lm output
+        return FlaxCausalLMOutput(logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+
+
+@add_start_docstrings("", "")
+class FlaxLLaMAForTokenRegression(FlaxLLaMAPreTrainedModel):
+    module_class = FlaxLLaMAForTokenRegressionModule
+
+
 # append_call_sample_docstring(
 #     FlaxGPTJForCausalLM,
 #     _TOKENIZER_FOR_DOC,
@@ -1293,3 +1602,27 @@ class LLaMATokenizer(PreTrainedTokenizer):
         if token_ids_1 is None:
             return len(token_ids_0 + eos) * [0]
         return len(token_ids_0 + eos + token_ids_1 + eos) * [0]
+
+# debug model by comparing to hf transformers
+if __name__ == '__main__':
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from EasyLM.checkpoint import StreamingCheckpointer
+    from EasyLM.jax_utils import JaxRNG, next_rng
+    import torch
+    tokenizer = AutoTokenizer.from_pretrained('CodeLlama-34b-hf')
+    hf_model = AutoModelForCausalLM.from_pretrained('CodeLlama-34b-hf')
+    llama_config = LLaMAConfig.load_config('30b2')
+    jax_model = FlaxLLaMAForCausalLMModule(
+        llama_config, dtype=jnp.float32
+    )
+    checkpointer = checkpointer = StreamingCheckpointer(
+        StreamingCheckpointer.get_default_config(), 'output',
+        enable=jax.process_index() == 0,
+    )
+    _, restored_params = checkpointer.load_trainstate_checkpoint('params::codellama_30b')
+    inputs = tokenizer("What is 2+2?", return_tensors='jax').input_ids
+    hf_logits = hf_model(torch.tensor(np.array(inputs))).logits
+    jax_logits = jax_model.apply(
+        restored_params, inputs, deterministic=True,
+    ).logits
+    import pdb; pdb.set_trace()
